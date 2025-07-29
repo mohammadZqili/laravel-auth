@@ -28,11 +28,11 @@ pipeline {
         
         stage('Checkout CI/CD Configuration') {
             steps {
-                echo '🔄 Checking out CI/CD infrastructure with SSH...'
+                echo '🔄 Checking out CI/CD infrastructure with credentials...'
                 dir('cicd-config') {
                     git branch: "${params.CICD_REPO_BRANCH}",
-                        url: 'git@github.com:mohammadZqili/ci-cd.git',
-                        credentialsId: 'github-ssh-key'
+                        url: 'https://github.com/mohammadZqili/ci-cd.git',
+                        credentialsId: 'github-token'
                 }
             }
         }
