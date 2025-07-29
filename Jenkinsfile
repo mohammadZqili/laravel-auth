@@ -28,11 +28,21 @@ pipeline {
         
         stage('Checkout CI/CD Configuration') {
             steps {
-                echo '🔄 Checking out CI/CD infrastructure with credentials...'
-                dir('cicd-config') {
-                    git branch: "${params.CICD_REPO_BRANCH}",
-                        url: 'https://github.com/mohammadZqili/ci-cd.git',
-                        credentialsId: 'github-token'
+                echo '🔄 Checking out CI/CD infrastructure...'
+                script {
+                    try {
+                        dir('cicd-config') {
+                            // Try to checkout CI/CD config repository (public repo, no credentials needed)
+                            git branch: "${params.CICD_REPO_BRANCH}",
+                                url: 'https://github.com/mohammadZqili/ci-cd.git'
+                        }
+                        echo '✅ Successfully checked out CI/CD configuration'
+                        env.CICD_CONFIG_AVAILABLE = 'true'
+                    } catch (Exception e) {
+                        echo "⚠️  CI/CD configuration repository not available: ${e.getMessage()}"
+                        echo "📦 Using fallback configuration from local setup"
+                        env.CICD_CONFIG_AVAILABLE = 'false'
+                    }
                 }
             }
         }
@@ -50,8 +60,13 @@ pipeline {
                     
                     echo "=== Checking files ==="
                     ls -la
-                    echo "=== CI/CD Config ==="
-                    ls -la cicd-config/docker/laravel/ || echo "CI/CD config not found"
+                    echo "=== CI/CD Config Status ==="
+                    echo "CI/CD Config Available: ${CICD_CONFIG_AVAILABLE}"
+                    if [ "${CICD_CONFIG_AVAILABLE}" = "true" ]; then
+                        ls -la cicd-config/docker/laravel/ || echo "CI/CD config directory not found"
+                    else
+                        echo "Using fallback build configuration"
+                    fi
                 '''
             }
         }
@@ -73,8 +88,8 @@ pipeline {
                 sh '''
                     echo "Building Docker image using CI/CD Dockerfile..."
                     
-                    # Use the Dockerfile from CI/CD repository
-                    if [ -f "cicd-config/docker/laravel/Dockerfile" ]; then
+                    # Use the Dockerfile from CI/CD repository if available
+                    if [ "${CICD_CONFIG_AVAILABLE}" = "true" ] && [ -f "cicd-config/docker/laravel/Dockerfile" ]; then
                         echo "✅ Using CI/CD Laravel Dockerfile"
                         docker build \
                             -f cicd-config/docker/laravel/Dockerfile \
@@ -83,22 +98,13 @@ pipeline {
                             -t ${DOCKER_REGISTRY}/${IMAGE_NAME}:latest \
                             .
                     else
-                        echo "❌ CI/CD Dockerfile not found, using fallback"
-                        # Fallback to building with a simple Dockerfile
-                        echo "FROM php:8.3-cli
-WORKDIR /app
-COPY . .
-RUN apt-get update && apt-get install -y git curl zip unzip
-COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
-RUN composer install --no-dev --optimize-autoloader || true
-CMD php artisan serve --host=0.0.0.0" > Dockerfile.temp
-                        
+                        echo "❌ CI/CD Dockerfile not found, using local fallback Dockerfile"
+                        # Use the local Dockerfile as fallback
                         docker build \
-                            -f Dockerfile.temp \
+                            -f Dockerfile \
                             -t ${DOCKER_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG} \
                             -t ${DOCKER_REGISTRY}/${IMAGE_NAME}:latest \
                             .
-                        rm -f Dockerfile.temp
                     fi
                 '''
             }
@@ -122,7 +128,7 @@ CMD php artisan serve --host=0.0.0.0" > Dockerfile.temp
                     echo "Deploying to ${ENVIRONMENT} environment"
                     echo "Using deployment config from CI/CD repository"
                     
-                    if [ -f "cicd-config/kubernetes/${APP_NAME}/deployment.yaml" ]; then
+                    if [ "${CICD_CONFIG_AVAILABLE}" = "true" ] && [ -f "cicd-config/kubernetes/${APP_NAME}/deployment.yaml" ]; then
                         echo "✅ Found Kubernetes deployment config"
                         # Apply Kubernetes manifests
                         # kubectl apply -f cicd-config/kubernetes/${APP_NAME}/ -n ${ENVIRONMENT}
@@ -150,8 +156,6 @@ CMD php artisan serve --host=0.0.0.0" > Dockerfile.temp
         always {
             echo '🧹 Cleaning up...'
             sh '''
-                # Clean up temporary files
-                rm -f Dockerfile.temp || true
                 # Clean up old images
                 docker image prune -f || true
             '''

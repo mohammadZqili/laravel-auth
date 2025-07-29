@@ -1,41 +1,96 @@
-FROM php:8.3-cli
+# Laravel Auth API - Fallback Dockerfile
+# Simple production-ready configuration
+
+FROM php:8.3-fpm-alpine
 
 # Install system dependencies
-RUN apt-get update && apt-get install -y \
+RUN apk add --no-cache \
     git \
     curl \
     libpng-dev \
-    libonig-dev \
+    oniguruma-dev \
     libxml2-dev \
-    libzip-dev \
     zip \
     unzip \
-    && docker-php-ext-install pdo_mysql mbstring exif pcntl bcmath gd zip \
-    && rm -rf /var/lib/apt/lists/*
+    nginx \
+    supervisor
+
+# Install PHP extensions
+RUN docker-php-ext-install pdo_mysql mbstring exif pcntl bcmath gd
 
 # Install Composer
 COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
 
+# Create application user
+RUN addgroup -g 1000 -S www && \
+    adduser -u 1000 -S www -G www
+
 # Set working directory
-WORKDIR /var/www/html
+WORKDIR /app
 
-# Copy application files
-ARG APP_DIR=.
-COPY ${APP_DIR} .
+# Copy composer files first for better caching
+COPY composer.json composer.lock ./
 
-# Fix git ownership issue
-RUN git config --global --add safe.directory /var/www/html || true
+# Install PHP dependencies
+RUN composer install --no-dev --no-scripts --no-autoloader --prefer-dist
 
-# Install dependencies without dev packages for CI
-RUN composer install --no-dev --optimize-autoloader --no-scripts || \
-    composer install --optimize-autoloader --no-scripts
+# Copy application code
+COPY . .
 
-# Generate autoload files
-RUN composer dump-autoload --optimize
+# Set proper ownership and permissions
+RUN chown -R www:www /app \
+    && chmod -R 755 /app/storage \
+    && chmod -R 755 /app/bootstrap/cache
 
-# Set permissions
-RUN chmod -R 755 storage bootstrap/cache || true
+# Generate optimized autoloader
+RUN composer dump-autoload --optimize --no-dev
 
+# Create nginx configuration
+RUN echo 'server {
+    listen 8000;
+    root /app/public;
+    index index.php;
+    
+    location / {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+    
+    location ~ \.php$ {
+        fastcgi_pass 127.0.0.1:9000;
+        fastcgi_index index.php;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        include fastcgi_params;
+    }
+}' > /etc/nginx/http.d/default.conf
+
+# Create supervisor configuration
+RUN echo '[supervisord]
+nodaemon=true
+user=root
+
+[program:nginx]
+command=nginx -g "daemon off;"
+autostart=true
+autorestart=true
+stdout_logfile=/dev/stdout
+stdout_logfile_maxbytes=0
+
+[program:php-fpm]
+command=php-fpm --nodaemonize
+autostart=true
+autorestart=true
+stdout_logfile=/dev/stdout
+stdout_logfile_maxbytes=0' > /etc/supervisor/conf.d/supervisord.conf
+
+# Switch to application user
+USER www
+
+# Expose port
 EXPOSE 8000
 
-CMD ["php", "artisan", "serve", "--host=0.0.0.0", "--port=8000"]
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8000/ || exit 1
+
+# Start supervisor
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
